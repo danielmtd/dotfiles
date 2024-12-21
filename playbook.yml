@@ -1,0 +1,21 @@
+---
+- name: Install CoreCtrl
+  hosts: localhost
+  become: true
+  tasks:
+    - name: Copy corectrl repo key
+      ansible.builtin.copy:
+        src: ./lib/corectrl
+        dest: /etc/apt/preferences.d/corectrl
+        remote_src: true
+        mode: '0644'
+
+    - name: Update apt cache
+      ansible.builtin.apt:
+        update_cache: true
+
+    - name: Install CoreCtrl
+      ansible.builtin.apt:
+        name: corectrl
+        state: present
+        update_cache: true
