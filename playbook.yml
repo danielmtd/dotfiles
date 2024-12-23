@@ -1,21 +1,27 @@
 ---
-- name: Install CoreCtrl
+
+- name: Install Deps
   hosts: localhost
   become: true
   tasks:
-    - name: Copy corectrl repo key
+    - name: Repo Key for coretrl
       ansible.builtin.copy:
         src: ./lib/corectrl
         dest: /etc/apt/preferences.d/corectrl
-        remote_src: true
         mode: '0644'
-
     - name: Update apt cache
       ansible.builtin.apt:
         update_cache: true
-
-    - name: Install CoreCtrl
+    - name: Install Deps
       ansible.builtin.apt:
-        name: corectrl
+        name: "{{ item }}"
         state: present
         update_cache: true
+      loop:
+        - curl
+        - vim
+        - corectrl
+        - sway
+        - parsec
+        - wdisplays
+        - rofi

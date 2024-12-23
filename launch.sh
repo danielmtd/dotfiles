@@ -1,6 +1,13 @@
 #!/bin/bash
 
 # install pipx and its depedenencies for ansible
+
+install_nix() {
+  echo "Installing Nix"
+  sh <(curl -L https://nixos.org/nix/install) --daemon
+  source ~/.bashrc
+}
+
 install_pipx() {
   echo "Installing pipx"
   sudo apt update
@@ -17,10 +24,6 @@ install_ansible() {
   ansible --version
 }
 
-update_variables() {
-  echo "Updating variables in Ansible playbook"
-}
-
 run_ansible() {
   echo "Running Ansible playbook"
   ansible-playbook playbook.yml --ask-become-pass
@@ -29,7 +32,8 @@ run_ansible() {
 main() {
   # install_pipx
   # update_variables
-  run_ansible
+  install_nix
+  # run_ansible
 }
 
 main

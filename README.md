@@ -1,7 +1,6 @@
 # Notes
 - import corectrl profile
 - find a cpu fan curve
-- 
 
 # ToDo
 - install corectrl
