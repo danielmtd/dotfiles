@@ -5,6 +5,7 @@
 # ToDo
 - install corectrl
 - install hyprland
+- create ansible for all of this
 
 # Shit to take in count
 
