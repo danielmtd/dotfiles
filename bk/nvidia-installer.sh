@@ -1,0 +1,507 @@
+#!/usr/bin/env bash
+# RUN_AS: root
+# nvidia-installer.sh — interactive NVIDIA driver installer for Debian 13
+#
+# Original by Dennis Hilk (v1.2.0) — vendored here unchanged.
+# This script is well-written, defensive, and APT-first. See README for
+# safety review.
+#
+# ============================================================
+# NVIDIA Driver + (optional) CUDA Toolkit for Debian 13 (Trixie)
+# "Debian-clean" edition (APT-first, no mixed installer by default)
+# Author: Dennis Hilk
+# Version: 1.2.0
+# ============================================================
+
+set -Eeuo pipefail
+
+LOGFILE="/var/log/nvidia-optimizer.log"
+mkdir -p "$(dirname "$LOGFILE")"
+exec > >(tee -a "$LOGFILE") 2>&1
+
+GREEN="\033[0;32m"; RED="\033[0;31m"; YELLOW="\033[1;33m"; CYAN="\033[0;36m"; NC="\033[0m"
+
+die() { echo -e "${RED}❌ $*${NC}"; exit 1; }
+info() { echo -e "${CYAN}ℹ️  $*${NC}"; }
+ok() { echo -e "${GREEN}✅ $*${NC}"; }
+warn() { echo -e "${YELLOW}⚠️  $*${NC}"; }
+
+need_cmd() {
+  command -v "$1" >/dev/null 2>&1 || die "Missing command: $1 (please install it first)"
+}
+
+pause() {
+  read -rp "Press Enter to continue..." _ </dev/tty || true
+}
+
+confirm() {
+  local prompt="${1:-Are you sure?} [y/N]: "
+  read -r -p "$prompt" ans </dev/tty || true
+  [[ "${ans:-}" =~ ^[Yy]$ ]]
+}
+
+progress() { local msg="$1"; echo -e "${CYAN}${msg}${NC}"; }
+
+if [[ ${EUID:-0} -ne 0 ]]; then
+  die "Please run as root: sudo $0"
+fi
+
+clear
+echo -e "${CYAN}──────────────────────────────────────────────────────────"
+echo -e "     🧠 NVIDIA Driver + CUDA Toolkit (Debian 13)  v1.2.0"
+echo -e "──────────────────────────────────────────────────────────${NC}"
+echo -e "Log file: ${YELLOW}${LOGFILE}${NC}"
+echo
+
+need_cmd uname
+need_cmd grep
+need_cmd sed
+need_cmd lspci
+need_cmd apt
+need_cmd dpkg
+need_cmd apt-cache
+need_cmd tee
+
+KERNEL="$(uname -r)"
+SESSION="${XDG_SESSION_TYPE:-unknown}"
+ARCH="$(dpkg --print-architecture)"
+SECURE_BOOT_ENABLED=0
+
+info "Kernel:  ${KERNEL}"
+info "Session: ${SESSION}"
+if [[ "$SESSION" == "wayland" ]]; then
+  warn "Wayland session detected. Xorg config tweaks may be ignored (depends on DE)."
+fi
+
+if command -v mokutil >/dev/null 2>&1; then
+  if mokutil --sb-state 2>/dev/null | grep -qi "enabled"; then
+    SECURE_BOOT_ENABLED=1
+    warn "Secure Boot appears ENABLED. Unsigned NVIDIA modules may fail to load."
+    warn "If the driver does not load: disable Secure Boot or enroll/sign modules (MOK)."
+    warn "Tip: update-secureboot-policy --enroll-key (requires secureboot-policy package)."
+  fi
+fi
+
+echo
+
+GPU="$(lspci | grep -E "VGA|3D" | grep -i nvidia || true)"
+[[ -n "$GPU" ]] || die "No NVIDIA GPU detected."
+ok "NVIDIA GPU detected:"
+echo "$GPU"
+echo
+
+CODENAME="unknown"
+if [[ -r /etc/os-release ]]; then
+  # shellcheck disable=SC1091
+  . /etc/os-release
+  CODENAME="${VERSION_CODENAME:-${CODENAME}}"
+fi
+
+info "Debian codename: ${CODENAME}"
+
+check_nonfree_sources() {
+  local sources=()
+  [[ -f /etc/apt/sources.list ]] && sources+=("/etc/apt/sources.list")
+  if compgen -G "/etc/apt/sources.list.d/*.list" >/dev/null; then
+    sources+=(/etc/apt/sources.list.d/*.list)
+  fi
+  if compgen -G "/etc/apt/sources.list.d/*.sources" >/dev/null; then
+    sources+=(/etc/apt/sources.list.d/*.sources)
+  fi
+
+  if (( ${#sources[@]} == 0 )); then
+    warn "No APT source files found."
+    return 1
+  fi
+
+  local all_text
+  all_text="$(cat "${sources[@]}" 2>/dev/null || true)"
+
+  if ! echo "$all_text" | grep -Eq '(^[[:space:]]*deb[[:space:]].*non-free|Components:.*non-free)'; then
+    warn "APT sources do not seem to include: non-free"
+    warn "Enable it in your sources (recommended for NVIDIA)."
+    return 1
+  fi
+
+  if ! echo "$all_text" | grep -Eq '(non-free-firmware)'; then
+    warn "APT sources do not seem to include: non-free-firmware"
+    warn "Debian 13 typically needs it for firmware packages."
+    return 1
+  fi
+
+  return 0
+}
+
+if ! check_nonfree_sources; then
+  echo
+  warn "Fix your APT sources first, then re-run this script."
+  echo "Tip: run option 1 in the main installer's Drivers menu (01-base.sh)"
+  echo "     which configures apt sources correctly."
+  echo
+  die "APT sources missing required components."
+fi
+ok "APT sources look good (non-free + non-free-firmware detected)."
+echo
+
+has_suite_sources() {
+  local suite="$1"
+  local sources=()
+  [[ -f /etc/apt/sources.list ]] && sources+=("/etc/apt/sources.list")
+  if compgen -G "/etc/apt/sources.list.d/*.list" >/dev/null; then
+    sources+=(/etc/apt/sources.list.d/*.list)
+  fi
+
+  if (( ${#sources[@]} == 0 )); then
+    return 1
+  fi
+
+  local all_text
+  all_text="$(cat "${sources[@]}" 2>/dev/null || true)"
+  echo "$all_text" | grep -Eq "^[[:space:]]*deb[[:space:]].*\\b${suite}\\b"
+}
+
+check_locks() {
+  info "Checking for running apt/dpkg processes..."
+  local timeout=120
+  local waited=0
+
+  while pgrep -x apt >/dev/null 2>&1 || pgrep -x dpkg >/dev/null 2>&1; do
+    if (( waited >= timeout )); then
+      warn "APT/dpkg still running after ${timeout}s."
+      warn "Killing package manager processes can BREAK your system."
+      if confirm "Do you want to attempt killing apt/dpkg anyway?"; then
+        warn "Attempting to kill apt/dpkg..."
+        pkill -9 apt 2>/dev/null || true
+        pkill -9 dpkg 2>/dev/null || true
+        break
+      else
+        die "Please wait until apt/dpkg finishes, then re-run."
+      fi
+    fi
+    echo -ne "${YELLOW}⏳ Waiting for package manager... (${waited}s)\r${NC}"
+    sleep 3
+    (( waited += 3 ))
+  done
+
+  echo
+  if [[ -e /var/lib/dpkg/lock-frontend || -e /var/lib/dpkg/lock || -e /var/cache/apt/archives/lock ]]; then
+    warn "Lock files detected."
+    warn "Removing lock files while apt is running can corrupt dpkg state."
+    if confirm "Remove lock files now? (only do this if you are sure apt is NOT running)"; then
+      rm -f /var/lib/dpkg/lock-frontend /var/lib/dpkg/lock /var/cache/apt/archives/lock || true
+      ok "Lock files removed."
+    else
+      warn "Keeping lock files."
+    fi
+  fi
+}
+
+if command -v nvidia-smi >/dev/null 2>&1; then
+  CURRENT="$(nvidia-smi --query-gpu=driver_version --format=csv,noheader | head -n1 || true)"
+  ok "Current NVIDIA driver: ${CURRENT:-unknown}"
+else
+  warn "No NVIDIA driver currently detected (nvidia-smi not found)."
+fi
+echo
+
+ensure_xorg_conf_d() {
+  mkdir -p /etc/X11/xorg.conf.d
+}
+
+write_xorg_driver_snippet() {
+  local driver="$1"
+  ensure_xorg_conf_d
+  cat > /etc/X11/xorg.conf.d/10-gpu-driver.conf <<EOF
+Section "Device"
+    Identifier "GPU0"
+    Driver "${driver}"
+EndSection
+EOF
+  ok "Wrote /etc/X11/xorg.conf.d/10-gpu-driver.conf (Driver \"${driver}\")"
+}
+
+remove_xorg_driver_snippet() {
+  if [[ -f /etc/X11/xorg.conf.d/10-gpu-driver.conf ]]; then
+    cp -a /etc/X11/xorg.conf.d/10-gpu-driver.conf \
+      "/etc/X11/xorg.conf.d/10-gpu-driver.conf.backup.$(date +%F_%H-%M-%S)"
+    rm -f /etc/X11/xorg.conf.d/10-gpu-driver.conf
+    ok "Removed xorg driver snippet (backup created)."
+  fi
+}
+
+install_common_deps() {
+  progress "Updating APT index"
+  apt update
+
+  progress "Installing build deps + headers"
+  local packages=(dkms build-essential firmware-misc-nonfree)
+  if [[ "${ARCH}" == "amd64" ]]; then
+    packages+=(linux-headers-amd64)
+  fi
+  if apt-cache show "linux-headers-${KERNEL}" >/dev/null 2>&1; then
+    packages+=("linux-headers-${KERNEL}")
+  else
+    warn "No exact headers for running kernel found: linux-headers-${KERNEL}"
+    warn "Consider rebooting into the newest kernel or installing linux-headers-${ARCH}."
+  fi
+  apt install -y --no-install-recommends "${packages[@]}"
+}
+
+blacklist_nouveau() {
+  cat > /etc/modprobe.d/blacklist-nouveau.conf <<'EOF'
+blacklist nouveau
+options nouveau modeset=0
+EOF
+  ok "Nouveau blacklisted: /etc/modprobe.d/blacklist-nouveau.conf"
+}
+
+unblacklist_nouveau() {
+  rm -f /etc/modprobe.d/blacklist-nouveau.conf || true
+  ok "Nouveau blacklist removed (if it existed)."
+}
+
+remove_nvidia() {
+  local installed
+  installed="$(dpkg-query -W -f='${Package}\n' 'nvidia-*' 2>/dev/null || true)"
+  if [[ -n "${installed}" ]]; then
+    warn "Installed NVIDIA-related packages that may be removed:"
+    echo "${installed}"
+    warn "This includes CUDA-related packages that match nvidia-*."
+  else
+    info "No installed NVIDIA-related packages detected."
+  fi
+
+  progress "Purging NVIDIA packages"
+  apt purge -y 'nvidia-*' || true
+
+  progress "Autoremoving unused deps"
+  apt autoremove -y || true
+
+  progress "Cleaning DKMS remnants (best-effort)"
+  rm -rf /var/lib/dkms/nvidia* 2>/dev/null || true
+
+  progress "Removing old modprobe snippets (best-effort)"
+  rm -f /etc/modprobe.d/nvidia*.conf 2>/dev/null || true
+
+  progress "Updating initramfs"
+  update-initramfs -u
+
+  remove_xorg_driver_snippet
+  ok "NVIDIA removed."
+}
+
+install_cuda_toolkit_debian() {
+  warn "Installing CUDA Toolkit from Debian repo (nvidia-cuda-toolkit)."
+  warn "Note: This may not be the newest CUDA version, but it is Debian-managed and stable."
+  warn "If you need the newest CUDA, consider NVIDIA's official repo:"
+  warn "https://developer.nvidia.com/cuda-downloads (use with caution on Debian)."
+  apt install -y nvidia-cuda-toolkit
+  ok "CUDA Toolkit installed (Debian package)."
+  echo
+  info "Verify: nvcc --version"
+}
+
+echo -e "${CYAN}──────────────────────────────────────────────────────────${NC}"
+echo -e "${CYAN}Choose your action:${NC}"
+echo -e "${CYAN}──────────────────────────────────────────────────────────${NC}"
+echo -e "1️⃣  Install NVIDIA driver (Debian stable repo)  [recommended]"
+echo -e "2️⃣  Install NVIDIA driver (Debian backports)     [recommended if you need newer]"
+echo -e "3️⃣  Enable open-source nouveau driver"
+echo -e "4️⃣  Remove NVIDIA driver and clean system"
+echo -e "5️⃣  ADVANCED: Install NVIDIA .run driver (NOT recommended on Debian)"
+echo -e "${CYAN}──────────────────────────────────────────────────────────${NC}"
+read -rp "Enter choice [1-5]: " CHOICE </dev/tty
+echo -e "${CYAN}──────────────────────────────────────────────────────────${NC}"
+echo
+
+check_locks
+
+handle_secure_boot() {
+  if (( SECURE_BOOT_ENABLED == 1 )); then
+    warn "Secure Boot is enabled. NVIDIA DKMS modules may require MOK enrollment."
+    if confirm "Install secureboot-policy and enroll MOK now?"; then
+      apt update
+      apt install -y secureboot-policy kmod
+      if command -v update-secureboot-policy >/dev/null 2>&1; then
+        update-secureboot-policy --enroll-key || true
+      else
+        warn "update-secureboot-policy not found. Please enroll MOK manually."
+      fi
+      warn "You may be prompted to set a MOK password and reboot to enroll."
+    fi
+  fi
+}
+
+should_write_xorg_snippet() {
+  if [[ "${SESSION}" == "wayland" || "${SESSION}" == "unknown" ]]; then
+    warn "Wayland/unknown session detected. Xorg snippets may be ignored."
+    confirm "Write Xorg driver snippet anyway?"
+    return $?
+  fi
+  return 0
+}
+
+case "${CHOICE}" in
+  1)
+    info "Installing NVIDIA driver from Debian stable repo..."
+    handle_secure_boot
+    remove_nvidia
+    unblacklist_nouveau
+    install_common_deps
+
+    progress "Installing nvidia-driver"
+    apt install -y nvidia-driver
+
+    blacklist_nouveau
+    progress "Updating initramfs"
+    update-initramfs -u
+
+    if should_write_xorg_snippet; then
+      write_xorg_driver_snippet "nvidia"
+    fi
+
+    ok "Driver installation finished (Debian stable repo)."
+    ;;
+
+  2)
+    info "Installing NVIDIA driver from Debian backports..."
+    handle_secure_boot
+    remove_nvidia
+    unblacklist_nouveau
+    install_common_deps
+
+    SUITE="${CODENAME}-backports"
+    warn "Using APT suite: ${SUITE}"
+    warn "If you don't have backports enabled, this will fail."
+    echo "Example line:"
+    echo "  deb http://deb.debian.org/debian ${SUITE} main contrib non-free non-free-firmware"
+    echo
+    if ! has_suite_sources "${SUITE}"; then
+      warn "Backports source (${SUITE}) not detected in APT sources."
+      if ! confirm "Continue anyway?"; then
+        die "Enable ${SUITE} in APT sources and re-run."
+      fi
+    fi
+
+    progress "Installing nvidia-driver from backports"
+    apt install -y -t "${SUITE}" nvidia-driver || die "Backports install failed. Enable ${SUITE} in APT sources."
+
+    blacklist_nouveau
+    progress "Updating initramfs"
+    update-initramfs -u
+
+    if should_write_xorg_snippet; then
+      write_xorg_driver_snippet "nvidia"
+    fi
+
+    ok "Driver installation finished (backports)."
+    ;;
+
+  3)
+    info "Enabling nouveau driver..."
+    remove_nvidia
+
+    progress "Installing nouveau Xorg driver"
+    apt install -y xserver-xorg-video-nouveau
+
+    unblacklist_nouveau
+    progress "Updating initramfs"
+    update-initramfs -u
+
+    if should_write_xorg_snippet; then
+      write_xorg_driver_snippet "nouveau"
+    fi
+
+    ok "Nouveau enabled."
+    ;;
+
+  4)
+    info "Removing NVIDIA driver and cleaning system..."
+    remove_nvidia
+    remove_xorg_driver_snippet
+    ok "System cleaned. Using default modesetting (no forced Xorg driver)."
+    ;;
+
+  5)
+    warn "ADVANCED MODE: NVIDIA .run installer on Debian is NOT recommended."
+    warn "This can cause APT conflicts and breaks Debian-managed updates."
+    if ! confirm "Continue with .run installer anyway?"; then
+      die "Aborted."
+    fi
+
+    need_cmd curl
+    need_cmd wget
+
+    if dpkg -l | grep -q '^ii[[:space:]]\+nvidia-driver'; then
+      warn "Debian nvidia-driver package appears installed."
+      warn "Mixing .run installer with APT can cause conflicts."
+      if ! confirm "Proceed and remove Debian NVIDIA packages?"; then
+        die "Aborted."
+      fi
+    fi
+
+    handle_secure_boot
+    remove_nvidia
+    unblacklist_nouveau
+    install_common_deps
+
+    mkdir -p /root/nvidia-install
+    cd /root/nvidia-install
+
+    warn "Fetching latest driver version (best-effort)..."
+    LATEST="$(curl -fsSL https://api.nvidia.com/v1/driver-latest-version/linux 2>/dev/null | grep -oP '"version":"\K[0-9.]+' || true)"
+    if [[ -z "${LATEST}" ]]; then
+      LATEST="580.95.05"
+      warn "Could not fetch latest version. Using fallback: ${LATEST}"
+    else
+      ok "Latest NVIDIA version detected: ${LATEST}"
+    fi
+
+    progress "Downloading NVIDIA-Linux-x86_64-${LATEST}.run"
+    wget -O NVIDIA-Linux.run "https://us.download.nvidia.com/XFree86/Linux-x86_64/${LATEST}/NVIDIA-Linux-x86_64-${LATEST}.run"
+
+    chmod +x NVIDIA-Linux.run
+
+    warn "You may need to stop your display manager before running the installer."
+    warn "If you are on a desktop system, consider switching to a TTY (Ctrl+Alt+F3) and stopping gdm/sddm/lightdm."
+    pause
+
+    progress "Running .run installer with DKMS"
+    ./NVIDIA-Linux.run --dkms --no-cc-version-check
+
+    blacklist_nouveau
+    progress "Updating initramfs"
+    update-initramfs -u
+
+    if should_write_xorg_snippet; then
+      write_xorg_driver_snippet "nvidia"
+    fi
+
+    ok ".run driver installation finished (advanced)."
+    ;;
+
+  *)
+    die "Invalid choice."
+    ;;
+esac
+
+echo
+
+if [[ "${CHOICE}" == "1" || "${CHOICE}" == "2" || "${CHOICE}" == "5" ]]; then
+  if confirm "Install CUDA Toolkit (Debian package: nvidia-cuda-toolkit) now?"; then
+    progress "Installing CUDA Toolkit"
+    apt update
+    install_cuda_toolkit_debian
+  else
+    info "Skipping CUDA Toolkit."
+  fi
+fi
+
+echo
+echo -e "${CYAN}──────────────────────────────────────────────────────────${NC}"
+ok "All tasks completed."
+echo -e "Log file: ${YELLOW}${LOGFILE}${NC}"
+echo -e "Reboot recommended: ${CYAN}reboot${NC}"
+echo -e "Verify driver:       ${CYAN}nvidia-smi${NC}"
+echo -e "Verify CUDA (if set):${CYAN}nvcc --version${NC}"
+echo -e "${CYAN}──────────────────────────────────────────────────────────${NC}"
