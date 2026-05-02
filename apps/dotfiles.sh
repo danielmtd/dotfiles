@@ -301,6 +301,33 @@ nnoremap <C-l> <C-w>l
 " Stay in visual mode after indent
 vnoremap < <gv
 vnoremap > >gv
+
+" Wayland clipboard via wl-clipboard
+if executable('wl-copy')
+  " Visual mode: copy selected text (any lines/columns) to clipboard
+  vnoremap <silent> <C-c> :<C-u>call system('wl-copy', GetVisualSelection())<CR>
+  vnoremap <silent> "+y   :<C-u>call system('wl-copy', GetVisualSelection())<CR>
+
+  " Normal mode: yyy or "+yy etc still works through this helper too
+  nnoremap <silent> <leader>Y :call system('wl-copy', join(getline(1,'$'), "\n"))<CR>
+
+  " Helper: returns the visual selection as a string, preserving newlines
+  function! GetVisualSelection()
+    let [line_start, col_start] = getpos("'<")[1:2]
+    let [line_end,   col_end]   = getpos("'>")[1:2]
+    let lines = getline(line_start, line_end)
+    if len(lines) == 0
+      return ''
+    endif
+    " Trim columns for character-wise selection
+    if visualmode() ==# 'v'
+      let lines[-1] = lines[-1][: col_end - (&selection == 'inclusive' ? 1 : 2)]
+      let lines[0]  = lines[0][col_start - 1:]
+    endif
+    return join(lines, "\n")
+  endfunction
+endif
+
 EOF
 ok "vim configured"
 
