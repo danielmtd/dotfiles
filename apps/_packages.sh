@@ -11,6 +11,7 @@ APT_PACKAGES=(
     ca-certificates
     gnupg
     flatpak
+    wl-clipboard
 )
 
 echo "==> Updating apt..."
