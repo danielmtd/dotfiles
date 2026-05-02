@@ -1,1 +1,1 @@
-cp -r "${HOME}/.config/niri/dms" "$(dirname "$0")/niri"
+cp -r "${HOME}/.config/niri" "$(dirname "$0")"
