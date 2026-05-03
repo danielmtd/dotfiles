@@ -1,0 +1,1 @@
+ sudo apt install -t trixie-backports mesa-vulkan-drivers firmware-amd-graphics linux-image-amd64 

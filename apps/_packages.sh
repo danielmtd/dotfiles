@@ -12,6 +12,7 @@ APT_PACKAGES=(
     gnupg
     flatpak
     wl-clipboard
+    corectrl
 )
 
 echo "==> Updating apt..."
@@ -26,6 +27,8 @@ FLATPAK_PACKAGES=(
     com.parsecgaming.parsec
     org.mozilla.firefox
     org.videolan.VLC
+    org.filezillaproject.Filezilla
+    com.calibre_ebook.calibre
 )
 
 echo "==> Adding Flathub remote (if missing)..."
