@@ -13,6 +13,8 @@ APT_PACKAGES=(
     flatpak
     wl-clipboard
     corectrl
+    resolvconf
+    wireguard
 )
 
 echo "==> Updating apt..."
@@ -29,6 +31,7 @@ FLATPAK_PACKAGES=(
     org.videolan.VLC
     org.filezillaproject.Filezilla
     com.calibre_ebook.calibre
+    com.bitwarden.desktop
 )
 
 echo "==> Adding Flathub remote (if missing)..."

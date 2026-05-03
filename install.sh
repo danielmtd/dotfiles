@@ -17,6 +17,7 @@ source "$(dirname "$0")/apps/thorium.sh"
 source "$(dirname "$0")/apps/vscode.sh"
 source "$(dirname "$0")/apps/_packages.sh"
 source "$(dirname "$0")/apps/cli.sh"
+source "$(dirname "$0")/apps/kitty-update.sh"
 ./apps/dotfiles.sh
 
 # niri config
